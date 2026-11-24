@@ -176,44 +176,56 @@ def _speed_of(relic: dict[str, Any], include_main: bool = False) -> float:
     return total
 
 
-def _pick_best(items: Iterable[dict[str, Any]], need_main_speed: bool, main_required: str | None) -> dict[str, Any] | None:
-    best = None
-    best_value = 0.0
-    for relic in items:
-        if relic["quality"] != 6 or relic["level"] != 15:
-            continue
-        if need_main_speed and relic["position"] == 2 and relic["mainLabel"] != "速度":
-            continue
-        if main_required and relic["position"] == 4 and relic["mainLabel"] != main_required:
-            continue
-        value = _speed_of(relic)
-        if best is None or value > best_value:
-            best, best_value = relic, value
-    return best
-
-
-def speed_combination(
+def _position_bests(
     by_position: dict[int, list[dict[str, Any]]],
-    suit_name: str | None = None,
     main_required: str | None = None,
-) -> dict[str, Any] | None:
-    """一速组合。返回的 speed 已含 2 号位速度主属性 57。"""
-    need_main_speed = True
+) -> tuple[dict[int, dict[str, Any]], dict[int, dict[str, dict[str, Any]]]]:
+    """每个号位排一次序，得到「不限套装最优」和「各套装最优」，后续组合直接查表。
 
-    def solve(constrained_slots: set[int] | None) -> dict[str, Any] | None:
-        picks: list[dict[str, Any]] = []
+    一速要按 12 套 × 15 种位置分配枚举，如果每次都重新过滤排序会非常慢
+    （单账号 3.6s → 查表后 ~0.1s）。
+    """
+    best_free: dict[int, dict[str, Any]] = {}
+    best_by_suit: dict[int, dict[str, dict[str, Any]]] = {}
+    for position in POSITIONS:
+        items = []
+        for relic in by_position.get(position) or []:
+            if relic["quality"] != 6 or relic["level"] != 15:
+                continue
+            if position == 2 and relic["mainLabel"] != "速度":
+                continue
+            if main_required and position == 4 and relic["mainLabel"] != main_required:
+                continue
+            items.append(relic)
+        items.sort(key=lambda r: -_speed_of(r))
+        best_free[position] = items[0] if items else None
+        per_suit: dict[str, dict[str, Any]] = {}
+        for relic in items:
+            per_suit.setdefault(relic["suitName"], relic)
+        best_by_suit[position] = per_suit
+    return best_free, best_by_suit
+
+
+def _combine(
+    best_free: dict[int, dict[str, Any]],
+    best_by_suit: dict[int, dict[str, dict[str, Any]]],
+    suit_name: str | None,
+) -> dict[str, Any] | None:
+    """按「4 件套 + 2 自由位」挑最优一速组合。"""
+    def pick(position: int, forced: bool) -> dict[str, Any] | None:
+        if forced:
+            return best_by_suit[position].get(suit_name)  # type: ignore[arg-type]
+        return best_free[position]
+
+    def build(forced_positions: set[int] | None) -> dict[str, Any] | None:
+        picks = []
         total = 0.0
         for position in POSITIONS:
-            items = by_position.get(position) or []
-            if constrained_slots is not None and position in constrained_slots:
-                items = [r for r in items if r["suitName"] == suit_name]
-            if main_required and position == 4:
-                items = [r for r in items if r["mainLabel"] == main_required]
-            pick = _pick_best(items, need_main_speed, main_required)
-            if pick is None:
+            relic = pick(position, bool(forced_positions and position in forced_positions))
+            if relic is None:
                 return None
-            picks.append(pick)
-            total += _speed_of(pick)
+            picks.append(relic)
+            total += _speed_of(relic)
         return {
             "subSum": round(total, 2),
             "speed": round(total + SPEED_MAIN_MAX, 2),
@@ -230,28 +242,43 @@ def speed_combination(
         }
 
     if not suit_name:
-        return solve(None)
+        return build(None)
 
     best = None
     for mask in range(1 << len(POSITIONS)):
         chosen = {POSITIONS[i] for i in range(len(POSITIONS)) if mask & (1 << i)}
         if len(chosen) != 4:
             continue
-        candidate = solve(chosen)
+        candidate = build(chosen)
         if candidate and (best is None or candidate["speed"] > best["speed"]):
             best = candidate
     return best
 
 
+def speed_combination(
+    by_position: dict[int, list[dict[str, Any]]],
+    suit_name: str | None = None,
+    main_required: str | None = None,
+) -> dict[str, Any] | None:
+    """一速组合。返回的 speed 已含 2 号位速度主属性 57。"""
+    best_free, best_by_suit = _position_bests(by_position, main_required)
+    return _combine(best_free, best_by_suit, suit_name)
+
+
 def speed_metrics(by_position: dict[int, list[dict[str, Any]]]) -> dict[str, Any]:
+    free, by_suit = _position_bests(by_position)
+
     suit_speeds = []
     for suit_id, suit in SUITS.items():
         if suit["isOma"]:
             continue
-        combination = speed_combination(by_position, suit["name"])
+        combination = _combine(free, by_suit, suit["name"])
         if combination:
             suit_speeds.append({"suit": suit["name"], "speed": combination["speed"]})
     suit_speeds.sort(key=lambda row: -row["speed"])
+
+    hit_free, hit_by_suit = _position_bests(by_position, "效果命中")
+    resist_free, resist_by_suit = _position_bests(by_position, "效果抵抗")
 
     full_speed = [
         relic
@@ -263,10 +290,10 @@ def speed_metrics(by_position: dict[int, list[dict[str, Any]]]) -> dict[str, Any
         and (relic["position"] != 2 or relic["mainLabel"] == "速度")
     ]
     return {
-        "scatter": speed_combination(by_position),
-        "lucky": speed_combination(by_position, "招财猫"),
-        "hit": speed_combination(by_position, None, "效果命中"),
-        "resist": speed_combination(by_position, None, "效果抵抗"),
+        "scatter": _combine(free, by_suit, None),
+        "lucky": _combine(free, by_suit, "招财猫"),
+        "hit": _combine(hit_free, hit_by_suit, None),
+        "resist": _combine(resist_free, resist_by_suit, None),
         "suitSpeeds": suit_speeds[:12],
         "fullSpeedCount": len(full_speed),
         "maxLevelCount": sum(
@@ -506,13 +533,23 @@ def hero_base(desc: dict[str, Any], wanted: list[str]) -> tuple[str | None, dict
     return name, static_base(name)
 
 
-def account_metrics(desc: dict[str, Any], pve_hero: str | None = None) -> dict[str, Any]:
+def account_metrics(
+    desc: dict[str, Any],
+    pve_hero: str | None = None,
+    oma_list: list[str] | None = None,
+) -> dict[str, Any]:
+    """算一个账号的全部指标。
+
+    oma_list 用于分批精算：首轮只算「荒骷髅」能把面板搜索量降到 1/3，
+    算过的组合记在 panelScope 里，后续可以只补没算的组合。
+    """
+    scope = oma_list or OMA_SUITS
     by_position = relics_from_desc(desc)
     speed = speed_metrics(by_position)
     hero_name, base = (pve_hero, (HERO_BY_NAME.get(pve_hero) or {}).get("baseStats")) if pve_hero else (None, None)
     if not base:
         hero_name, base = hero_base(desc, DEFAULT_PVE_HEROES)
-    panels = pve_panel(by_position, base) if base else []
+    panels = pve_panel(by_position, base, oma_list=scope) if base else []
 
     by_four: dict[str, list[int]] = {}
     for row in panels:
@@ -532,12 +569,14 @@ def account_metrics(desc: dict[str, Any], pve_hero: str | None = None) -> dict[s
     return {
         "hero": hero_name,
         "base": base,
+        "panelScope": list(scope),
         "speed": speed,
         "pve": {
             "panels": panels,
             "summary": summary,
             "overall": overall,
             "badge": _badge(overall),
+            "bySuit": {row["suit"]: row["best"] for row in summary},
         },
         "pveScoreRanking": pve_suit_ranking(by_position)[:10],
         "resources": {

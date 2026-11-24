@@ -48,8 +48,21 @@ CREATE INDEX IF NOT EXISTS idx_listings_pvp ON listings(pvp_score);
 CREATE TABLE IF NOT EXISTS details (
     eid         TEXT PRIMARY KEY,
     metrics     TEXT,
-    computed_at TEXT
+    panel_scope TEXT,
+    computed_at TEXT,
+    error       TEXT
 );
+
+-- 每个账号每个 4 件套的最优输出面板，单独成表才能按「狂骨 ≥ 30000」高效筛
+CREATE TABLE IF NOT EXISTS details_panels (
+    eid     TEXT,
+    suit    TEXT,
+    best    INTEGER,
+    average INTEGER,
+    scope   TEXT,
+    PRIMARY KEY (eid, suit)
+);
+CREATE INDEX IF NOT EXISTS idx_panels_suit_best ON details_panels(suit, best);
 
 CREATE TABLE IF NOT EXISTS runs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,7 +105,17 @@ def connect(path=None) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """老库补列：CREATE TABLE IF NOT EXISTS 不会改已存在的表结构。"""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(details)")}
+    for name, ddl in (("panel_scope", "TEXT"), ("error", "TEXT")):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE details ADD COLUMN {name} {ddl}")
+    conn.commit()
 
 
 def upsert_listings(conn: sqlite3.Connection, rows: Iterable[dict[str, Any]]) -> int:
@@ -133,12 +156,35 @@ def mark_inactive(conn: sqlite3.Connection, keep_eids: set[str]) -> int:
 
 
 def save_metrics(conn: sqlite3.Connection, eid: str, metrics: dict[str, Any]) -> None:
+    scope = ",".join(metrics.get("panelScope") or [])
     conn.execute(
-        "INSERT INTO details (eid, metrics, computed_at) VALUES (?, ?, ?) "
-        "ON CONFLICT(eid) DO UPDATE SET metrics=excluded.metrics, computed_at=excluded.computed_at",
-        (eid, json.dumps(metrics, ensure_ascii=False), now()),
+        "INSERT INTO details (eid, metrics, panel_scope, computed_at, error) VALUES (?, ?, ?, ?, NULL) "
+        "ON CONFLICT(eid) DO UPDATE SET metrics=excluded.metrics, panel_scope=excluded.panel_scope, "
+        "computed_at=excluded.computed_at, error=NULL",
+        (eid, json.dumps(metrics, ensure_ascii=False), scope, now()),
+    )
+    conn.execute("DELETE FROM details_panels WHERE eid=?", (eid,))
+    for row in (metrics.get("pve") or {}).get("summary") or []:
+        conn.execute(
+            "INSERT OR REPLACE INTO details_panels (eid, suit, best, average, scope) VALUES (?, ?, ?, ?, ?)",
+            (eid, row.get("suit"), int(row.get("best") or 0), int(row.get("average") or 0), scope),
+        )
+    conn.commit()
+
+
+def save_error(conn: sqlite3.Connection, eid: str, message: str) -> None:
+    conn.execute(
+        "INSERT INTO details (eid, metrics, computed_at, error) VALUES (?, NULL, ?, ?) "
+        "ON CONFLICT(eid) DO UPDATE SET error=excluded.error, computed_at=excluded.computed_at",
+        (eid, now(), message[:500]),
     )
     conn.commit()
+
+
+def computed_scopes(conn: sqlite3.Connection) -> dict[str, str]:
+    """eid -> 已算过的首领组合（逗号分隔），用于增量补算。"""
+    rows = conn.execute("SELECT eid, panel_scope FROM details WHERE metrics IS NOT NULL").fetchall()
+    return {row["eid"]: row["panel_scope"] or "" for row in rows}
 
 
 def get_metrics(conn: sqlite3.Connection, eid: str) -> dict[str, Any] | None:
@@ -195,31 +241,69 @@ def query(
         add("(server LIKE ? OR diy_desc LIKE ? OR tags LIKE ?)", *( [f"%{filters['keyword']}%"] * 3 ))
     if filters.get("tag"):
         add("tags LIKE ?", f"%{filters['tag']}%")
+    if filters.get("minPanel") is not None:
+        suit = filters.get("panelSuit") or "狂骨"
+        add(
+            "EXISTS (SELECT 1 FROM details_panels p WHERE p.eid=listings.eid AND p.suit=? AND p.best >= ?)",
+            suit,
+            float(filters["minPanel"]),
+        )
+    if filters.get("hasDetail"):
+        add("EXISTS (SELECT 1 FROM details d WHERE d.eid=listings.eid AND d.metrics IS NOT NULL)")
+    if filters.get("onlyMissing"):
+        add("NOT EXISTS (SELECT 1 FROM details d WHERE d.eid=listings.eid AND d.metrics IS NOT NULL)")
 
     clause = (" WHERE " + " AND ".join(where)) if where else ""
-    column = SORTABLE.get(sort, "scatter_speed")
     order = "DESC" if desc else "ASC"
+    if sort == "panel":
+        suit = filters.get("panelSuit") or "狂骨"
+        column = "(SELECT best FROM details_panels p WHERE p.eid=listings.eid AND p.suit=?)"
+        order_params: list[Any] = [suit]
+    else:
+        column = SORTABLE.get(sort, "scatter_speed")
+        order_params = []
     total = conn.execute(f"SELECT COUNT(*) AS n FROM listings{clause}", params).fetchone()["n"]
     rows = conn.execute(
         f"SELECT * FROM listings{clause} ORDER BY {column} IS NULL, {column} {order} LIMIT ? OFFSET ?",
-        params + [limit, offset],
+        params + order_params + order_params + [limit, offset],
     ).fetchall()
     items = []
+    eids = [row["eid"] for row in rows]
+    panels: dict[str, dict[str, int]] = {}
+    if eids:
+        placeholders = ",".join("?" for _ in eids)
+        for panel in conn.execute(
+            f"SELECT eid, suit, best FROM details_panels WHERE eid IN ({placeholders})", eids
+        ):
+            panels.setdefault(panel["eid"], {})[panel["suit"]] = panel["best"]
     for row in rows:
         item = dict(row)
         item["tags"] = json.loads(item.get("tags") or "[]")
         item["top_heros"] = json.loads(item.get("top_heros") or "[]")
         item["highlights"] = json.loads(item.get("highlights") or "[]")
+        item["panels"] = panels.get(item["eid"], {})
         items.append(item)
     return {"total": total, "items": items}
 
 
 def stats(conn: sqlite3.Connection) -> dict[str, Any]:
     total = conn.execute("SELECT COUNT(*) AS n FROM listings WHERE active=1").fetchone()["n"]
-    details = conn.execute("SELECT COUNT(*) AS n FROM details").fetchone()["n"]
+    details = conn.execute("SELECT COUNT(*) AS n FROM details WHERE metrics IS NOT NULL").fetchone()["n"]
+    errors = conn.execute("SELECT COUNT(*) AS n FROM details WHERE error IS NOT NULL AND metrics IS NULL").fetchone()["n"]
+    pending = conn.execute(
+        "SELECT COUNT(*) AS n FROM listings l WHERE l.active=1 AND NOT EXISTS "
+        "(SELECT 1 FROM details d WHERE d.eid=l.eid AND d.metrics IS NOT NULL)"
+    ).fetchone()["n"]
     last = conn.execute("SELECT MAX(last_seen) AS t FROM listings").fetchone()["t"]
     runs = [dict(row) for row in conn.execute("SELECT * FROM runs ORDER BY id DESC LIMIT 5")]
-    return {"listings": total, "details": details, "lastSeen": last, "runs": runs}
+    return {
+        "listings": total,
+        "details": details,
+        "pendingDetails": pending,
+        "errors": errors,
+        "lastSeen": last,
+        "runs": runs,
+    }
 
 
 def start_run(conn: sqlite3.Connection, kind: str, note: str = "") -> int:

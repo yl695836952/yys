@@ -5,14 +5,15 @@
 ## 形态
 
 ```
-fetch-list        全量列表（价格分桶枚举，约 1.3~1.5 万条）
-   ↓ 存 data/yys.db · listings 表
-serve             本地筛选网页（http://127.0.0.1:24980）
-   ↓ 你挑出候选
-fetch-detail      对候选号抓 8MB 全量明细，算一速/套装/输出面板
-   ↓ 存 data/yys.db · details 表
-在网页抽屉里看精算结果
+fetch-list         全量列表（价格分桶枚举，约 1.3~1.5 万条）→ listings
+   ↓
+fetch-details-all  全量/增量精算：每个号抓 8MB 明细算御魂 → details + details_panels
+   ↓
+serve              本地筛选页（一速、头尾、斗技、PVE 套装面板都能筛）
 ```
+
+**为什么必须先精算**：藏宝阁列表接口只有一速、招财一速、头尾数、斗技分、图鉴这类字段，
+没有御魂明细；「狂骨 4 件套 + 荒骷髅 2 件套面板 > 30000」这种条件只能靠明细逐件算。
 
 ## 快速开始
 
@@ -28,10 +29,18 @@ python tools/check_cookie.py        # 自检
 # 2. 抓全量列表（约 1000 次请求，建议低并发慢慢跑）
 yyscbg fetch-list --workers 4
 
-# 3. 起筛选页
-yyscbg serve                        # 打开 http://127.0.0.1:24980
+# 3. 全量精算（首轮只算荒骷髅，快 3 倍；可随时 Ctrl+C，下次自动续跑）
+yyscbg fetch-details-all --oma 荒骷髅
 
-# 4. 对筛选出的候选号做精算（按 eid 或按条件批量）
+# 4. 起筛选页
+yyscbg serve                        # 打开 http://127.0.0.1:24980
+```
+
+之后每次只要重复第 2、3 步：`fetch-details-all` 默认是增量，只算新上架和还没算过的号。
+
+只想看某几个号时，也可以指定订单号精算：
+
+```bash
 yyscbg fetch-detail --eids 202611202001616-16-4S0QIIC2VYCKE
 yyscbg fetch-detail --min-speed 158 --min-lucky 155 --limit 20
 ```
@@ -52,14 +61,29 @@ yyscbg fetch-detail --min-speed 158 --min-lucky 155 --limit 20
 
 达标/毕业阈值默认 28000 / 30000，可在 `.env` 里改。
 
+面板按「4 件套（狂骨/破势/海月火玉/伤魂鸟/隐念/镇墓兽/片叶之苇）× 2 件首领魂（土蜘蛛/荒骷髅/鬼灵歌伎）」搜最优，
+筛选页可以指定套装，例如「狂骨 ≥ 30000」查的就是 `狂骨 4 件 + 荒骷髅 2 件、满暴` 的那个面板值。
+
+## 精算成本（实测）
+
+| 项目 | 数值 |
+|---|---|
+| 单号明细 | 原始 8.1MB，开 gzip 后约 1MB |
+| 单号计算（只算荒骷髅） | 约 2.9 秒 |
+| 单号计算（三个首领都算） | 约 8.3 秒 |
+| 全量 1.5 万号首轮（荒骷髅，8 进程） | 约 1.5~2 小时 |
+| 之后每天增量 | 只算新上架，几分钟 |
+
+进度会打印「已算/总数、个每秒、预计剩余分钟」，Ctrl+C 只丢当前这批，下次从剩下的继续。
+
 ## 目录
 
 ```
-src/yyscbg/cbg.py        藏宝阁接口客户端（列表 / 详情）
+src/yyscbg/cbg.py        藏宝阁接口客户端（列表 / 详情，gzip）
 src/yyscbg/parse.py      列表字段标准化（highlights → 数值）
 src/yyscbg/relics.py     御魂与面板计算（一速、套装、PVE 面板搜索）
-src/yyscbg/fetch.py      全量枚举、详情精算、piko 导入
-src/yyscbg/store.py      SQLite 存取与筛选查询
+src/yyscbg/fetch.py      全量枚举、批量精算流水线、piko 导入
+src/yyscbg/store.py      SQLite 存取、面板表与筛选查询
 src/yyscbg/server.py     本地筛选服务
 src/yyscbg/data/         御魂套装表、式神基础面板、区服表（静态资料）
 web/                     筛选页面
@@ -72,5 +96,6 @@ AGENTS.md                交接说明（给下一个接手的 Trae/agent 看）
 
 - 只抓**在售**账号，抓完会把本轮没出现的记录标成 `active=0`，不删历史。
 - 单次查询服务端最多返回 100 页 × 15 条，所以全量靠价格区间二分拆桶；脚本会自动拆。
-- 详情接口每个账号约 8MB，只对候选号抓，别全量抓。
+- 详情接口每个账号约 8MB，全量精算请在晚上挂着跑；不想全量就先按一速/价格粗筛，再对这批精算。
 - 数据仅本地存放，`data/` 已被 gitignore。
+- 面板是按「满暴 100%」算的；不满足满暴的组合会被排除，所以某些号会出现「无可用组合」。

@@ -76,6 +76,9 @@ main { padding: 16px 22px 60px; }
 .metric { display: flex; justify-content: space-between; font-size: 12px; padding: 4px 6px; background: #fafaf7; border-radius: 6px; }
 .metric span:first-child { color: var(--muted); }
 .metric b { font-variant-numeric: tabular-nums; }
+.pve-grad { color: var(--gold); font-weight: 700; }
+.pve-pass { color: var(--green); font-weight: 600; }
+.muted { color: var(--muted); }
 .hl { display: flex; flex-wrap: wrap; gap: 5px; }
 .chip { font-size: 11px; padding: 2px 7px; border-radius: 999px; background: #f1f1ec; color: #555; }
 .badge { font-size: 11px; padding: 2px 7px; border-radius: 999px; font-weight: 600; }

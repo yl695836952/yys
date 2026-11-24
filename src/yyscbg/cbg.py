@@ -12,12 +12,14 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import random
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 
 BASE = "https://yys.cbg.163.com"
 LIST_PATH = "/cgi-bin/recommend.py?client_type=h5&act=recommd_by_role"
@@ -51,6 +53,7 @@ class CbgClient:
             "User-Agent": UA,
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "zh-CN,zh;q=0.9",
+            "Accept-Encoding": "gzip, deflate",
             "Referer": f"{BASE}/cgi/mweb/pl?view_loc=equip_list",
             "Origin": BASE,
             "Cookie": self.cookie,
@@ -62,7 +65,14 @@ class CbgClient:
             try:
                 req = urllib.request.Request(url, data=data, headers=self._headers())
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                    return resp.read()
+                    raw = resp.read()
+                    # 详情单号 8MB，开 gzip 后通常只剩 1MB 左右，全量精算能省一个量级的流量
+                    encoding = (resp.headers.get("Content-Encoding") or "").lower()
+                    if "gzip" in encoding:
+                        return gzip.decompress(raw)
+                    if "deflate" in encoding:
+                        return zlib.decompress(raw)
+                    return raw
             except urllib.error.HTTPError as exc:
                 last = exc
                 if exc.code in (403, 429, 500, 502, 503):
@@ -110,6 +120,10 @@ class CbgClient:
     # ------------------------------------------------------------------ 详情
     def equip_desc(self, serverid: int | str, ordersn: str) -> dict:
         """取账号全量明细（约 8MB，含全量御魂与式神基础面板）。"""
+        return json.loads(self.equip_desc_text(serverid, ordersn))
+
+    def equip_desc_text(self, serverid: int | str, ordersn: str) -> str:
+        """只返回 equip_desc 的 JSON 文本，供进程池里的子进程自行解析。"""
         url = f"{BASE}{DESC_PATH}?serverid={serverid}&ordersn={urllib.parse.quote(str(ordersn))}"
         raw = self._open(url)
         outer = json.loads(raw.decode("utf-8"))
@@ -117,7 +131,5 @@ class CbgClient:
         if desc is None:
             raise CbgError(f"详情缺少 equip_desc：{ordersn}")
         if isinstance(desc, str):
-            desc = json.loads(desc)
-        if not isinstance(desc, dict):
-            raise CbgError(f"详情 equip_desc 结构异常：{ordersn}")
-        return desc
+            return desc
+        return json.dumps(desc, ensure_ascii=False)

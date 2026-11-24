@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -100,8 +101,7 @@ def save_listings(rows: Iterable[dict[str, Any]], mark_stale: bool = True) -> in
 
 def compute_detail(client: CbgClient, eid: str, serverid: Any, hero: str | None = None) -> dict[str, Any]:
     desc = client.equip_desc(serverid, eid)
-    metrics = account_metrics(desc)
-    return metrics
+    return account_metrics(desc)
 
 
 def compute_details(
@@ -109,21 +109,154 @@ def compute_details(
     targets: list[tuple[str, Any]],
     hero: str | None = None,
     progress: Callable[[str], None] = print,
+    oma_list: list[str] | None = None,
 ) -> int:
     conn = store.connect()
     done = 0
     try:
         for eid, serverid in targets:
             try:
-                metrics = compute_detail(client, eid, serverid, hero)
-                store.save_metrics(conn, eid, metrics)
+                desc = client.equip_desc(serverid, eid)
+                store.save_metrics(conn, eid, account_metrics(desc, hero, oma_list))
                 done += 1
                 progress(f"  精算 {eid} 完成（{done}/{len(targets)}）")
             except CbgError as exc:
+                store.save_error(conn, eid, str(exc))
                 progress(f"  精算 {eid} 失败：{exc}")
     finally:
         conn.close()
     return done
+
+
+# ------------------------------------------------------------ 全量精算流水线
+def _compute_worker(payload: tuple[str, str, list[str] | None]) -> tuple[str, dict | None, str | None]:
+    """子进程：解析 equip_desc 文本并算指标（放在进程池里绕过 GIL）。"""
+    eid, text, oma_list = payload
+    try:
+        desc = json.loads(text)
+        return eid, account_metrics(desc, None, oma_list), None
+    except Exception as exc:  # noqa: BLE001 - 记录到库，不中断整批
+        return eid, None, f"{type(exc).__name__}: {exc}"
+
+
+def _fetch_one(client: CbgClient, eid: str, serverid: Any) -> tuple[str, str | None, str | None]:
+    try:
+        return eid, client.equip_desc_text(serverid, eid), None
+    except Exception as exc:  # noqa: BLE001
+        return eid, None, str(exc)
+
+
+def pending_targets(conn, oma_scope: list[str], mode: str = "auto") -> list[tuple[str, Any]]:
+    """待精算清单。
+
+    mode:
+      auto    还没算过的 + 已算过但这批首领组合没覆盖的（默认，增量）
+      missing 只有完全没算过的
+      redo    全部在售账号重算
+    """
+    done = store.computed_scopes(conn)
+    rows = conn.execute("SELECT eid, serverid FROM listings WHERE active=1").fetchall()
+    wanted = set(oma_scope)
+    targets = []
+    for row in rows:
+        eid = row["eid"]
+        if mode == "redo":
+            targets.append((eid, row["serverid"]))
+            continue
+        if eid not in done:
+            targets.append((eid, row["serverid"]))
+            continue
+        if mode == "missing":
+            continue
+        if not wanted.issubset(set(filter(None, (done[eid] or "").split(",")))):
+            targets.append((eid, row["serverid"]))
+    return targets
+
+
+def run_detail_pipeline(
+    make_client: Callable[[], CbgClient],
+    oma_scope: list[str],
+    download_workers: int = 6,
+    batch_size: int = 60,
+    limit: int | None = None,
+    mode: str = "auto",
+    progress: Callable[[str], None] = print,
+) -> dict[str, int]:
+    """全量/增量精算：批量并发下载 → 进程池计算 → 落库。
+
+    每个账号约 8MB 原始响应（gzip 后约 1MB），所以下载用线程池、计算用进程池，
+    并按批提交；Ctrl+C 只会丢当前这一批。
+    """
+    conn = store.connect()
+    targets = pending_targets(conn, oma_scope, mode)
+    if limit:
+        targets = targets[:limit]
+    total = len(targets)
+    progress(f"待精算 {total} 个账号，首领组合：{'/'.join(oma_scope)}，模式：{mode}")
+    if not total:
+        conn.close()
+        return {"done": 0, "failed": 0, "total": 0}
+
+    run_id = store.start_run(conn, "details", f"oma={'/'.join(oma_scope)}")
+    done = failed = 0
+    started = time.time()
+    cpu_workers = max(1, (os.cpu_count() or 2) - 1)
+    queue: list[tuple[str, Any]] = []
+
+    def flush(batch: list[tuple[str, Any]]) -> None:
+        nonlocal done, failed
+        clients = [make_client() for _ in range(min(download_workers, len(batch)))]
+        texts: list[tuple[str, str | None, str | None]] = []
+        with ThreadPoolExecutor(max_workers=len(clients)) as pool:
+            futures = {}
+            for index, (eid, serverid) in enumerate(batch):
+                client = clients[index % len(clients)]
+                futures[pool.submit(_fetch_one, client, eid, serverid)] = eid
+            for future in as_completed(futures):
+                texts.append(future.result())
+
+        payloads = [(eid, text, oma_scope) for eid, text, error in texts if text]
+        for eid, _, error in texts:
+            if error:
+                store.save_error(conn, eid, error)
+                failed += 1
+
+        if payloads:
+            with ProcessPoolExecutor(max_workers=cpu_workers) as pool:
+                for eid, metrics, error in pool.map(_compute_worker, payloads, chunksize=2):
+                    if metrics:
+                        store.save_metrics(conn, eid, metrics)
+                        done += 1
+                    else:
+                        store.save_error(conn, eid, error or "计算失败")
+                        failed += 1
+
+        elapsed = time.time() - started
+        speed = done / elapsed if elapsed > 0 else 0
+        eta = (total - done - failed) / speed / 60 if speed > 0 else 0
+        progress(f"  进度 {done + failed}/{total}（成功 {done} / 失败 {failed}），{speed:.2f} 个/秒，预计剩余 {eta:.0f} 分钟")
+
+    try:
+        for target in targets:
+            queue.append(target)
+            if len(queue) >= batch_size:
+                flush(queue)
+                queue.clear()
+        if queue:
+            flush(queue)
+    except KeyboardInterrupt:
+        progress("已中断：当前批次已保存，下次运行会从剩余账号继续")
+    finally:
+        store.finish_run(conn, run_id, done)
+        conn.close()
+    return {"done": done, "failed": failed, "total": total}
+
+
+def _fetch_one(client: CbgClient, eid: str, serverid: Any) -> tuple[str, str | None, str | None]:
+    try:
+        return eid, client.equip_desc_text(serverid, eid), None
+    except Exception as exc:  # noqa: BLE001
+        return eid, None, str(exc)
 
 
 def pick_targets(limit: int = 50, **filters: Any) -> list[tuple[str, Any]]:

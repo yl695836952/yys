@@ -60,6 +60,8 @@ class Handler(BaseHTTPRequestHandler):
                 "minPvp": _num(query.get("minPvp", [None])[0]),
                 "minSixStar": _num(query.get("minSixStar", [None])[0]),
                 "minFengzidu": _num(query.get("minFengzidu", [None])[0]),
+                "minPanel": _num(query.get("minPanel", [None])[0]),
+                "panelSuit": query.get("panelSuit", ["狂骨"])[0],
                 "area": query.get("area", [""])[0],
                 "keyword": query.get("keyword", [""])[0],
                 "tag": query.get("tag", [""])[0],

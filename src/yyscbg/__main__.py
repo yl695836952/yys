@@ -8,8 +8,16 @@ from pathlib import Path
 
 from . import store
 from .cbg import CbgClient, CbgError, SessionTimeout
-from .config import cookie, load_dotenv
-from .fetch import compute_details, fetch_all, import_piko, import_piko_details, pick_targets, save_listings
+from .config import OMA_SUITS, cookie, load_dotenv
+from .fetch import (
+    compute_details,
+    fetch_all,
+    import_piko,
+    import_piko_details,
+    pick_targets,
+    run_detail_pipeline,
+    save_listings,
+)
 from .server import serve
 
 
@@ -28,6 +36,7 @@ def cmd_fetch_list(args: argparse.Namespace) -> int:
 
 def cmd_fetch_detail(args: argparse.Namespace) -> int:
     client = _client()
+    oma = _oma_list(args.oma)
     if args.eids:
         conn = store.connect()
         try:
@@ -45,15 +54,41 @@ def cmd_fetch_detail(args: argparse.Namespace) -> int:
             "minPvp": args.min_pvp,
             "minPrice": args.min_price,
             "maxPrice": args.max_price,
+            "minPanel": args.min_panel,
+            "panelSuit": args.panel_suit,
         }
         targets = pick_targets(args.limit, **filters)
     if not targets:
         print("没有匹配的账号，先用 fetch-list 抓一轮，或放宽筛选条件")
         return 1
-    print(f"将对 {len(targets)} 个账号做详情精算（每个约 8MB 数据）")
-    done = compute_details(client, targets)
+    print(f"将对 {len(targets)} 个账号做详情精算（每个约 8MB 数据，首领组合 {'/'.join(oma)}）")
+    done = compute_details(client, targets, oma_list=oma)
     print(f"完成 {done} 个")
     return 0
+
+
+def cmd_fetch_details_all(args: argparse.Namespace) -> int:
+    oma = _oma_list(args.oma)
+    result = run_detail_pipeline(
+        _client,
+        oma,
+        download_workers=args.download_workers,
+        batch_size=args.batch,
+        limit=args.limit,
+        mode=args.mode,
+    )
+    print(f"结束：成功 {result['done']} / 失败 {result['failed']} / 计划 {result['total']}")
+    return 0
+
+
+def _oma_list(value: str | None) -> list[str]:
+    if not value:
+        return list(OMA_SUITS)
+    names = [part.strip() for part in value.split(",") if part.strip()]
+    unknown = [name for name in names if name not in OMA_SUITS]
+    if unknown:
+        raise SystemExit(f"未知首领御魂：{'、'.join(unknown)}（可选：{'、'.join(OMA_SUITS)}）")
+    return names
 
 
 def cmd_import_piko(args: argparse.Namespace) -> int:
@@ -100,7 +135,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--min-pvp", type=float, default=None)
     p.add_argument("--min-price", type=float, default=None)
     p.add_argument("--max-price", type=float, default=None)
+    p.add_argument("--min-panel", type=float, default=None)
+    p.add_argument("--panel-suit", default="狂骨")
+    p.add_argument("--oma", default="", help="首领御魂，逗号分隔；默认全部（土蜘蛛,荒骷髅,鬼灵歌伎）")
     p.set_defaults(func=cmd_fetch_detail)
+
+    p = sub.add_parser("fetch-details-all", help="全量/增量精算：把在售账号全部算一遍面板")
+    p.add_argument("--oma", default="荒骷髅", help="首轮建议只算「荒骷髅」，快约 3 倍")
+    p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--download-workers", type=int, default=6)
+    p.add_argument("--batch", type=int, default=60)
+    p.add_argument("--mode", choices=["auto", "missing", "redo"], default="auto",
+                   help="auto=增量（含补算新组合）；missing=只算没算过的；redo=全部重算")
+    p.set_defaults(func=cmd_fetch_details_all)
 
     p = sub.add_parser("import-piko", help="导入 piko 浏览器模式回传的列表 JSON")
     p.add_argument("path")

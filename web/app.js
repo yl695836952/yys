@@ -11,12 +11,13 @@ function buildQuery() {
   const map = {
     minPrice: "minPrice", maxPrice: "maxPrice", minSpeed: "minSpeed", minLucky: "minLucky",
     minHead: "minHead", minPvp: "minPvp", minSixStar: "minSixStar", minFengzidu: "minFengzidu",
-    keyword: "keyword",
+    minPanel: "minPanel", keyword: "keyword",
   };
   for (const [id, key] of Object.entries(map)) {
     const value = $(id).value.trim();
     if (value !== "") params.set(key, value);
   }
+  params.set("panelSuit", $("panelSuit").value);
   params.set("sort", $("sort").value);
   params.set("desc", $("direction").value);
   params.set("limit", String(state.limit));
@@ -63,6 +64,15 @@ function renderCard(item) {
   metrics.appendChild(metric("斗技分", item.pvp_score ?? "—"));
   metrics.appendChild(metric("六星式神", item.six_star_cnt ?? "—"));
   metrics.appendChild(metric("风姿度", item.fengzidu ? Number(item.fengzidu).toLocaleString("zh-CN") : "—"));
+
+  const panels = item.panels || {};
+  const suit = state.panelSuit || "狂骨";
+  if (panels[suit] !== undefined) {
+    const row = metric(`${suit}面板`, `<span class="${panels[suit] >= state.thresholds.panel_grad ? "pve-grad" : panels[suit] >= state.thresholds.panel_pass ? "pve-pass" : ""}">${panels[suit]}</span>`);
+    metrics.appendChild(row);
+  } else {
+    metrics.appendChild(metric("PVE 面板", '<span class="muted">未精算</span>'));
+  }
   card.appendChild(metrics);
 
   const tags = document.createElement("div");
@@ -74,6 +84,7 @@ function renderCard(item) {
 }
 
 async function load() {
+  state.panelSuit = $("panelSuit").value;
   const res = await fetch("/api/accounts?" + buildQuery().toString());
   const data = await res.json();
   state.total = data.total;
@@ -98,6 +109,8 @@ async function loadStats() {
   state.thresholds = data.thresholds || {};
   const parts = [`在售 ${Number(data.listings || 0).toLocaleString("zh-CN")} 条`];
   if (data.details) parts.push(`已精算 ${data.details} 个`);
+  if (data.pendingDetails) parts.push(`待精算 ${Number(data.pendingDetails).toLocaleString("zh-CN")} 个`);
+  if (data.errors) parts.push(`失败 ${data.errors}`);
   parts.push(`更新于 ${data.lastSeen || "—"}`);
   parts.push(`达标线 ${state.thresholds.panel_pass} / 毕业 ${state.thresholds.panel_grad}`);
   $("statLine").textContent = parts.join(" · ");
@@ -191,7 +204,7 @@ async function openDetail(eid) {
 
 $("apply").onclick = () => { state.offset = 0; load(); };
 $("reset").onclick = () => {
-  ["minPrice", "maxPrice", "minSpeed", "minLucky", "minHead", "minPvp", "minSixStar", "minFengzidu", "keyword"].forEach((id) => { $(id).value = ""; });
+  ["minPrice", "maxPrice", "minSpeed", "minLucky", "minHead", "minPvp", "minSixStar", "minFengzidu", "minPanel", "keyword"].forEach((id) => { $(id).value = ""; });
   state.offset = 0; load();
 };
 $("prev").onclick = () => { state.offset = Math.max(0, state.offset - state.limit); load(); };
@@ -199,6 +212,7 @@ $("next").onclick = () => { state.offset += state.limit; load(); };
 $("closeDrawer").onclick = () => { $("drawer").hidden = true; };
 $("sort").onchange = () => { state.offset = 0; load(); };
 $("direction").onchange = () => { state.offset = 0; load(); };
+$("panelSuit").onchange = () => { state.offset = 0; load(); };
 
 loadStats();
 load();
