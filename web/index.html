@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>藏宝阁 · 账号 PVP/PVE 筛选</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">Y</span>
+    <div>
+      <h1>藏宝阁账号筛选</h1>
+      <p class="sub" id="statLine">加载中…</p>
+    </div>
+  </div>
+  <div class="actions">
+    <span class="hint">数据来自本机 SQLite，抓取用 <code>fetch-list</code></span>
+  </div>
+</header>
+
+<section class="filters">
+  <div class="field"><label>价格（元）</label>
+    <div class="pair"><input id="minPrice" type="number" placeholder="最低"><input id="maxPrice" type="number" placeholder="最高"></div>
+  </div>
+  <div class="field"><label>散件一速 ≥</label><input id="minSpeed" type="number" step="0.1" placeholder="如 155"></div>
+  <div class="field"><label>招财一速 ≥</label><input id="minLucky" type="number" step="0.1" placeholder="如 150"></div>
+  <div class="field"><label>头数 ≥</label><input id="minHead" type="number" placeholder="如 4"></div>
+  <div class="field"><label>斗技分 ≥</label><input id="minPvp" type="number" placeholder="如 3000"></div>
+  <div class="field"><label>六星式神 ≥</label><input id="minSixStar" type="number" placeholder="如 150"></div>
+  <div class="field"><label>风姿度 ≥</label><input id="minFengzidu" type="number" placeholder="如 30000"></div>
+  <div class="field"><label>区服 / 关键字</label><input id="keyword" type="text" placeholder="区服名、资产、荣耀"></div>
+  <div class="field"><label>排序</label>
+    <select id="sort">
+      <option value="speed">散件一速</option>
+      <option value="lucky">招财一速</option>
+      <option value="price">价格</option>
+      <option value="pvp">斗技分</option>
+      <option value="head">头数</option>
+      <option value="heros">六星数</option>
+      <option value="fengzidu">风姿度</option>
+      <option value="time">最近更新</option>
+    </select>
+  </div>
+  <div class="field"><label>方向</label>
+    <select id="direction"><option value="1">从高到低</option><option value="0">从低到高</option></select>
+  </div>
+  <button id="apply" class="primary">筛选</button>
+  <button id="reset" class="ghost">重置</button>
+</section>
+
+<main>
+  <div class="resultbar"><span id="count">—</span><span id="pageInfo" class="muted"></span>
+    <div class="pager"><button id="prev" class="ghost">上一页</button><button id="next" class="ghost">下一页</button></div>
+  </div>
+  <div id="grid" class="grid"></div>
+</main>
+
+<aside id="drawer" class="drawer" hidden>
+  <div class="drawer-head"><h2 id="drawerTitle">账号详情</h2><button id="closeDrawer" class="ghost">关闭</button></div>
+  <div id="drawerBody" class="drawer-body"></div>
+</aside>
+
+<script src="/app.js"></script>
+</body>
+</html>
