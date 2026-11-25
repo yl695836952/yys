@@ -98,7 +98,7 @@ def cmd_import_piko(args: argparse.Namespace) -> int:
 
 
 def cmd_import_piko_details(args: argparse.Namespace) -> int:
-    count = import_piko_details(Path(args.path))
+    count = import_piko_details(Path(args.path), _oma_list(args.oma))
     print(f"从 piko 数据精算入库 {count} 个账号")
     return 0
 
@@ -155,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("import-piko-details", help="导入 piko 回传的账号明细并本地精算")
     p.add_argument("path")
+    p.add_argument("--oma", default="", help="首领御魂，逗号分隔；默认全部")
     p.set_defaults(func=cmd_import_piko_details)
 
     p = sub.add_parser("stats", help="查看本地数据概况")

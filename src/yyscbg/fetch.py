@@ -280,7 +280,7 @@ def import_piko(path: Path) -> int:
     return save_listings(rows, mark_stale=False)
 
 
-def import_piko_details(path: Path) -> int:
+def import_piko_details(path: Path, oma_list: list[str] | None = None) -> int:
     """导入账号明细并本地精算。
 
     支持三种文件：
@@ -312,7 +312,7 @@ def import_piko_details(path: Path) -> int:
                 eid = match["eid"]
             if not eid or not isinstance(desc, dict):
                 continue
-            store.save_metrics(conn, eid, account_metrics(desc))
+            store.save_metrics(conn, eid, account_metrics(desc, None, oma_list))
             saved += 1
     finally:
         conn.close()
