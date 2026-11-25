@@ -99,14 +99,14 @@ def save_listings(rows: Iterable[dict[str, Any]], mark_stale: bool = True) -> in
         conn.close()
 
 
-def compute_detail(client: CbgClient, eid: str, serverid: Any, hero: str | None = None) -> dict[str, Any]:
-    desc = client.equip_desc(serverid, eid)
+def compute_detail(client: CbgClient, eid: str, serverid: Any, ordersn: str | None = None, hero: str | None = None) -> dict[str, Any]:
+    desc = client.equip_desc(serverid, ordersn or eid)
     return account_metrics(desc)
 
 
 def compute_details(
     client: CbgClient,
-    targets: list[tuple[str, Any]],
+    targets: list[tuple[str, Any, str]],
     hero: str | None = None,
     progress: Callable[[str], None] = print,
     oma_list: list[str] | None = None,
@@ -114,9 +114,9 @@ def compute_details(
     conn = store.connect()
     done = 0
     try:
-        for eid, serverid in targets:
+        for eid, serverid, ordersn in targets:
             try:
-                desc = client.equip_desc(serverid, eid)
+                desc = client.equip_desc(serverid, ordersn)
                 store.save_metrics(conn, eid, account_metrics(desc, hero, oma_list))
                 done += 1
                 progress(f"  精算 {eid} 完成（{done}/{len(targets)}）")
@@ -139,14 +139,14 @@ def _compute_worker(payload: tuple[str, str, list[str] | None]) -> tuple[str, di
         return eid, None, f"{type(exc).__name__}: {exc}"
 
 
-def _fetch_one(client: CbgClient, eid: str, serverid: Any) -> tuple[str, str | None, str | None]:
+def _fetch_one(client: CbgClient, eid: str, serverid: Any, ordersn: str) -> tuple[str, str | None, str | None]:
     try:
-        return eid, client.equip_desc_text(serverid, eid), None
+        return eid, client.equip_desc_text(serverid, ordersn), None
     except Exception as exc:  # noqa: BLE001
         return eid, None, str(exc)
 
 
-def pending_targets(conn, oma_scope: list[str], mode: str = "auto") -> list[tuple[str, Any]]:
+def pending_targets(conn, oma_scope: list[str], mode: str = "auto") -> list[tuple[str, Any, str]]:
     """待精算清单。
 
     mode:
@@ -155,21 +155,22 @@ def pending_targets(conn, oma_scope: list[str], mode: str = "auto") -> list[tupl
       redo    全部在售账号重算
     """
     done = store.computed_scopes(conn)
-    rows = conn.execute("SELECT eid, serverid FROM listings WHERE active=1").fetchall()
+    rows = conn.execute("SELECT eid, serverid, ordersn FROM listings WHERE active=1").fetchall()
     wanted = set(oma_scope)
     targets = []
     for row in rows:
         eid = row["eid"]
+        ordersn = row["ordersn"] or eid
         if mode == "redo":
-            targets.append((eid, row["serverid"]))
+            targets.append((eid, row["serverid"], ordersn))
             continue
         if eid not in done:
-            targets.append((eid, row["serverid"]))
+            targets.append((eid, row["serverid"], ordersn))
             continue
         if mode == "missing":
             continue
         if not wanted.issubset(set(filter(None, (done[eid] or "").split(",")))):
-            targets.append((eid, row["serverid"]))
+            targets.append((eid, row["serverid"], ordersn))
     return targets
 
 
@@ -201,17 +202,17 @@ def run_detail_pipeline(
     done = failed = 0
     started = time.time()
     cpu_workers = max(1, (os.cpu_count() or 2) - 1)
-    queue: list[tuple[str, Any]] = []
+    queue: list[tuple[str, Any, str]] = []
 
-    def flush(batch: list[tuple[str, Any]]) -> None:
+    def flush(batch: list[tuple[str, Any, str]]) -> None:
         nonlocal done, failed
         clients = [make_client() for _ in range(min(download_workers, len(batch)))]
         texts: list[tuple[str, str | None, str | None]] = []
         with ThreadPoolExecutor(max_workers=len(clients)) as pool:
             futures = {}
-            for index, (eid, serverid) in enumerate(batch):
+            for index, (eid, serverid, ordersn) in enumerate(batch):
                 client = clients[index % len(clients)]
-                futures[pool.submit(_fetch_one, client, eid, serverid)] = eid
+                futures[pool.submit(_fetch_one, client, eid, serverid, ordersn)] = eid
             for future in as_completed(futures):
                 texts.append(future.result())
 
@@ -252,18 +253,11 @@ def run_detail_pipeline(
     return {"done": done, "failed": failed, "total": total}
 
 
-def _fetch_one(client: CbgClient, eid: str, serverid: Any) -> tuple[str, str | None, str | None]:
-    try:
-        return eid, client.equip_desc_text(serverid, eid), None
-    except Exception as exc:  # noqa: BLE001
-        return eid, None, str(exc)
-
-
-def pick_targets(limit: int = 50, **filters: Any) -> list[tuple[str, Any]]:
+def pick_targets(limit: int = 50, **filters: Any) -> list[tuple[str, Any, str]]:
     conn = store.connect()
     try:
         result = store.query(conn, filters, sort="speed", desc=True, limit=limit)
-        return [(row["eid"], row["serverid"]) for row in result["items"]]
+        return [(row["eid"], row["serverid"], row.get("ordersn") or row["eid"]) for row in result["items"]]
     finally:
         conn.close()
 
@@ -309,9 +303,13 @@ def import_piko_details(path: Path) -> int:
             if desc is None and "inventory" in payload:
                 desc = payload
             if not eid:
-                # 浏览器下载文件名形如 cbg_202611202001616-16-4S0QIIC2VYCKE.json
+                # 浏览器下载文件名形如 cbg_<game_ordersn>.json
                 stem = file.stem
                 eid = stem[4:] if stem.startswith("cbg_") else stem
+            # 文件名里是 game_ordersn，映射回列表里的 eid，否则页面查不到
+            match = conn.execute("SELECT eid FROM listings WHERE ordersn=?", (eid,)).fetchone()
+            if match:
+                eid = match["eid"]
             if not eid or not isinstance(desc, dict):
                 continue
             store.save_metrics(conn, eid, account_metrics(desc))

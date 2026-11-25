@@ -31,13 +31,16 @@
 - 单页固定 **15 条**（`count`/`page_size` 均无效），`pager.total_pages` 上限 **100**。
 - `order_by` / `order_direction` / `order_field` 实测被忽略，永远是默认推荐序 → 全量必须靠价格拆桶。
 - 无 Cookie 时返回 `{"status":2,"status_code":"SESSION_TIMEOUT"}`。
-- 详情 `GET /cgi/api/get_equip_desc?serverid=&ordersn=`，返回 `{version, equip_desc}`，`equip_desc` 是字符串化 JSON，约 8MB。
+- **详情必须传 `game_ordersn`，不能传 `eid`**（`eid` 尾段 17 位、`game_ordersn` 尾段 13 位；传 eid 会返回 `{"status":0,"msg":"物品不存在"}`）。`listings.ordersn` 专存 `game_ordersn`，抓列表时务必一起保存。
+- 详情 `GET /cgi/api/get_equip_desc?serverid=&ordersn=<game_ordersn>`，返回 `{version, equip_desc}`，`equip_desc` 是字符串化 JSON；大小 90KB（小号）到 8MB（大号）不等。
 - 详情里没有 `yuhun` 字段：御魂在 `inventory`（uuid 索引），带 `pos`/`suitid` 的就是御魂；`boss_equips` 只是 uuid 数组。
 - 御魂字段：`attrs[0]` 主属性，`attrs[1..]` 副属性，`single_attr` 特殊属性（首领魂），`rattr` 强化跳数（系数 × GROWTH_MAX = 实际值，优先用它）。
 - 一速口径：`Σ 六个位置最优速度副属性 + 57`（2 号位主属性按满值 57 折算，**不要把 2 号位主属性再加一遍**，这是最初的坑）。
 - 页内 `fetch()` 调详情接口会 `TypeError: Failed to fetch`，**XHR 正常**。
 - 页面 → `http://127.0.0.1` 会被浏览器拦截（PNA/CSP），piko 只能靠 eval 返回值或浏览器下载落盘。
 - **piko eval 单次回传上限约 26KB**（一页列表多一点），所以 piko 只能抽查；全量必须用 Cookie 模式。
+- **浏览器下载有限制**：同一页面连续触发多个 `<a download>` 会被 Chrome「自动下载多个文件」拦住，只落第一个。要么让用户点允许，要么一个一个来，批量请走 Cookie 模式。
+- **风控**：藏宝阁对高频请求敏感，实测用户在家跑全量时触发短信验证。批量精算请把 `--download-workers` 压到 2~3、`--batch` 调小（如 20），必要时在批之间 sleep。
 
 ## 下一步（按优先级）
 

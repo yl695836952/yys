@@ -12,6 +12,7 @@ from .config import DB_PATH
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS listings (
     eid            TEXT PRIMARY KEY,
+    ordersn        TEXT,
     serverid       INTEGER,
     price          REAL,
     area           TEXT,
@@ -75,7 +76,7 @@ CREATE TABLE IF NOT EXISTS runs (
 """
 
 _COLUMNS = [
-    "eid", "serverid", "price", "area", "server", "platform", "level", "status", "collect",
+    "eid", "ordersn", "serverid", "price", "area", "server", "platform", "level", "status", "collect",
     "selling_time", "scatter_speed", "lucky_speed", "head_cnt", "tail_cnt", "head_speed",
     "pvp_score", "ssr_cnt", "six_star_cnt", "sign_days", "fengzidu", "soul_jade",
     "yuxing_dama", "diy_desc", "tags", "top_heros", "highlights",
@@ -115,6 +116,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for name, ddl in (("panel_scope", "TEXT"), ("error", "TEXT")):
         if name not in columns:
             conn.execute(f"ALTER TABLE details ADD COLUMN {name} {ddl}")
+    listing_columns = {row["name"] for row in conn.execute("PRAGMA table_info(listings)")}
+    if "ordersn" not in listing_columns:
+        conn.execute("ALTER TABLE listings ADD COLUMN ordersn TEXT")
+        # 老数据没有 game_ordersn，先用 eid 兜底；重新抓一轮列表会覆盖成正确值
+        conn.execute("UPDATE listings SET ordersn=eid WHERE ordersn IS NULL")
     conn.commit()
 
 

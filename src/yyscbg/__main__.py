@@ -44,7 +44,7 @@ def cmd_fetch_detail(args: argparse.Namespace) -> int:
             for eid in args.eids.split(","):
                 listing = store.get_listing(conn, eid.strip())
                 if listing:
-                    targets.append((listing["eid"], listing["serverid"]))
+                    targets.append((listing["eid"], listing["serverid"], listing.get("ordersn") or listing["eid"]))
         finally:
             conn.close()
     else:

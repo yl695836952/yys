@@ -64,8 +64,11 @@ def parse_listing(item: dict[str, Any]) -> dict[str, Any]:
         )
 
     price_fen = item.get("price") or 0
+    # 详情接口要的是 game_ordersn，列表里的 eid 传过去会返回「物品不存在」。
+    ordersn = item.get("game_ordersn") or item.get("ordersn") or item.get("eid") or ""
     return {
         "eid": item.get("eid") or "",
+        "ordersn": ordersn,
         "serverid": item.get("serverid"),
         "price": round(price_fen / 100, 2),
         "area": item.get("area_name") or item.get("area") or "",

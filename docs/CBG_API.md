@@ -53,8 +53,20 @@ page=1&search_type=role&price_min=10000&price_max=20000
 ## 详情
 
 ```
-GET /cgi/api/get_equip_desc?serverid=16&ordersn=<eid>
+GET /cgi/api/get_equip_desc?serverid=16&ordersn=<game_ordersn>
 ```
+
+**`ordersn` 必须用列表里的 `game_ordersn`，不能传 `eid`。**
+
+两者的格式不同（`eid` 尾部是 17 位、`game_ordersn` 尾部是 13 位），
+用 `eid` 请求会返回：
+
+```json
+{"status": 0, "msg": "物品不存在"}
+```
+
+这是踩过的坑：代码里 `listings.ordersn` 专门存 `game_ordersn`，详情只认这个字段。
+明细大小差异很大：小号约 90KB，满收藏的大号约 8MB。
 
 响应外层：
 

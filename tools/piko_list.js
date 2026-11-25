@@ -19,6 +19,8 @@
   const payload = JSON.parse(await post(`page=${PAGE}&search_type=role`));
   const rows = (payload.result || []).map((item) => ({
     eid: item.eid,
+    // 详情接口只认 game_ordersn，务必一起带回去
+    game_ordersn: item.game_ordersn,
     serverid: item.serverid,
     price: item.price,
     area_name: item.area_name,
